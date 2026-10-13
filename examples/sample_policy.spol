@@ -1,0 +1,40 @@
+# ==========================================
+# Sample Production Security Policy
+# Domain-Specific Security Policy Language
+# ==========================================
+
+# Rule 1: Block suspicious or untrusted SSH attempts
+RULE BLOCK_SSH_UNKNOWN
+WHEN TCP PORT 22
+IF SOURCE UNKNOWN
+THEN BLOCK
+
+# Rule 2: Allow secure web traffic from any client
+RULE ALLOW_HTTPS
+WHEN TCP PORT 443
+IF SOURCE ANY
+THEN ALLOW
+
+# Rule 3: Allow internal administrative SSH
+RULE ALLOW_INTERNAL_SSH
+WHEN TCP PORT 22
+IF SOURCE 192.168.1.0/24
+THEN ALLOW
+
+# Rule 4: Allow standard web traffic
+RULE ALLOW_HTTP
+WHEN TCP PORT 80
+IF SOURCE ANY
+THEN ALLOW
+
+# Rule 5: Allow internal DNS resolution
+RULE ALLOW_DNS
+WHEN UDP PORT 53
+IF SOURCE INTERNAL
+THEN ALLOW
+
+# Rule 6: Allow internal ICMP ping for diagnostics
+RULE ALLOW_PING
+WHEN ICMP PORT ANY
+IF SOURCE INTERNAL
+THEN ALLOW

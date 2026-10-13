@@ -1,0 +1,31 @@
+# ==========================================
+# Security Policy with Conflicting & Shadowed Rules
+# Used to demonstrate Phase 5 (Analysis) & Phase 6 (Optimizer Dead Code Pruning)
+# ==========================================
+
+# Rule 1: Allow all web traffic on port 80
+RULE ALLOW_HTTP_ANY
+WHEN TCP PORT 80
+IF SOURCE ANY
+THEN ALLOW
+
+# Rule 2: Conflicting rule with opposite action for the exact same condition
+# Under first-match semantics, this rule will NEVER trigger!
+RULE BLOCK_HTTP_ANY
+WHEN TCP PORT 80
+IF SOURCE ANY
+THEN BLOCK
+
+# Rule 3: Broad rule blocking all external traffic
+RULE BLOCK_ALL_EXTERNAL
+WHEN ANY PORT ANY
+IF SOURCE EXTERNAL
+THEN BLOCK
+
+# Rule 4: Narrower rule attempting to allow external HTTPS
+# Because Rule 3 precedes this and matches all EXTERNAL traffic with BLOCK,
+# Rule 4 is completely shadowed and can never execute!
+RULE ALLOW_EXTERNAL_HTTPS
+WHEN TCP PORT 443
+IF SOURCE EXTERNAL
+THEN ALLOW

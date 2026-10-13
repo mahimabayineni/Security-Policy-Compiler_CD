@@ -1,0 +1,16 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Output artifacts
+output/
+*.spol.py
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,40 @@
+# ==========================================
+# Security Policy with Duplicate & Subsumed Rules
+# Used to demonstrate Phase 5 (Analysis) & Phase 6 (Optimization)
+# ==========================================
+
+# Active production rule
+RULE ALLOW_HTTPS_PRIMARY
+WHEN TCP PORT 443
+IF SOURCE ANY
+THEN ALLOW
+
+# Exact Duplicate rule: Same condition, same action
+RULE ALLOW_HTTPS_REDUNDANT
+WHEN TCP PORT 443
+IF SOURCE ANY
+THEN ALLOW
+
+# Another rule
+RULE ALLOW_DNS_UDP
+WHEN UDP PORT 53
+IF SOURCE ANY
+THEN ALLOW
+
+# Another exact duplicate of DNS
+RULE ALLOW_DNS_COPY
+WHEN UDP PORT 53
+IF SOURCE ANY
+THEN ALLOW
+
+# Broader rule: All internal traffic allowed
+RULE ALLOW_ALL_INTERNAL
+WHEN ANY PORT ANY
+IF SOURCE INTERNAL
+THEN ALLOW
+
+# Subsumed rule: Narrower condition with the SAME action as ALLOW_ALL_INTERNAL
+RULE ALLOW_INTERNAL_SSH
+WHEN TCP PORT 22
+IF SOURCE INTERNAL
+THEN ALLOW

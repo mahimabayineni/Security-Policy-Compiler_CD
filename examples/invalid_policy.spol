@@ -1,0 +1,28 @@
+# ==========================================
+# Policy with Intentional Errors
+# Demonstrates compiler diagnostics & error handling
+# ==========================================
+
+# Error 1: Port out of range (99999 > 65535)
+RULE RULE_BAD_PORT
+WHEN TCP PORT 99999
+IF SOURCE ANY
+THEN ALLOW
+
+# Error 2: Unsupported protocol (FTP is application layer, not transport)
+RULE RULE_BAD_PROTOCOL
+WHEN FTP PORT 21
+IF SOURCE ANY
+THEN BLOCK
+
+# Error 3: Duplicate rule identifier
+RULE RULE_BAD_PORT
+WHEN UDP PORT 53
+IF SOURCE ANY
+THEN ALLOW
+
+# Error 4: Invalid ICMP port specification
+RULE RULE_BAD_ICMP
+WHEN ICMP PORT 8080
+IF SOURCE ANY
+THEN ALLOW
