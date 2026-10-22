@@ -1,0 +1,64 @@
+# ======================================================================
+# advanced_anomalies.spol
+# Demonstrates the semantic (not textual) rule analysis:
+#   - INTERNAL is understood as the RFC 1918 ranges, so it covers 192.168.x.x
+#   - an IP address equals the same address written as /32
+#   - correlation, generalization and redundant-preceding anomalies
+#   - ICMP PORT 0, lowercase keywords, and a CIDR with host bits set
+# ======================================================================
+
+# Exception carved out of a broader rule (GENERALIZATION, intentional)
+RULE BLOCK_GUEST_SSH
+WHEN TCP PORT 22
+IF SOURCE 192.168.50.0/24
+THEN BLOCK
+
+# Redundant: the later ALLOW_LAB_ALL covers it with the same action
+RULE ALLOW_LAB_SSH
+WHEN TCP PORT 22
+IF SOURCE 10.20.0.0/16
+THEN ALLOW
+
+RULE ALLOW_LAB_ALL
+WHEN TCP PORT ANY
+IF SOURCE 10.20.0.0/16
+THEN ALLOW
+
+RULE ALLOW_INTERNAL_SSH
+WHEN TCP PORT 22
+IF SOURCE internal
+THEN ALLOW
+
+# SHADOWED: INTERNAL already includes 192.168.1.0/24 (host bits set -> warning)
+RULE BLOCK_ADMIN_SUBNET_SSH
+WHEN TCP PORT 22
+IF SOURCE 192.168.1.77/24
+THEN BLOCK
+
+# Duplicate written differently: 203.0.113.5 == 203.0.113.5/32
+RULE BLOCK_ATTACKER
+WHEN ANY PORT ANY
+IF SOURCE 203.0.113.5
+THEN BLOCK
+
+RULE BLOCK_ATTACKER_AGAIN
+WHEN ANY PORT ANY
+IF SOURCE 203.0.113.5/32
+THEN BLOCK
+
+# CORRELATION with the next rule: they overlap on TCP 443 from 203.0.113.0/24
+RULE ALLOW_PARTNER_ALL
+WHEN TCP PORT ANY
+IF SOURCE 203.0.113.0/24
+THEN ALLOW
+
+RULE BLOCK_EXTERNAL_HTTPS
+WHEN TCP PORT 443
+IF SOURCE EXTERNAL
+THEN BLOCK
+
+# ICMP has no ports: PORT 0 means the same as PORT ANY
+RULE ALLOW_PING
+WHEN ICMP PORT 0
+IF SOURCE INTERNAL
+THEN ALLOW

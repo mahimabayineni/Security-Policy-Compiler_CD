@@ -1,35 +1,55 @@
 """
-Phase 5: Rule Analysis (rule_analyzer.py)
+Phase 4: Rule Analysis (rule_analyzer.py)
 
-Performs static policy anomaly analysis under First-Match Semantics:
-1. Exact Duplicate Rules: Same condition, same action (redundant).
-2. Direct Conflicting Rules: Same condition, opposite action (the second is shadowed).
-3. Shadowed / Subsumed Rules: An earlier broader rule supersedes a later narrower rule.
+Detects policy anomalies under FIRST-MATCH semantics with a DEFAULT-DENY
+fallback, following the anomaly classification of Al-Shaer & Hamed
+("Firewall Policy Advisor", IEEE INFOCOM 2004).
 
-Provides detailed diagnostic explanations without falsely flagging distinct ports or protocols.
+For rules Ri before Rj (i < j), using the set relations in policy_semantics.py:
+
+  Rj equivalent to Ri, same action      -> EXACT_DUPLICATE     (Rj unreachable)
+  Rj equivalent to Ri, different action -> CONFLICT            (Rj unreachable, contradictory intent)
+  Ri covers Rj, same action             -> REDUNDANT_SUBSUMED  (Rj unreachable)
+  Ri covers Rj, different action        -> SHADOWED_RULE       (Rj unreachable, its action never applies)
+  Rj covers Ri, same action, and no rule
+     between them overlaps Ri with a
+     different action                   -> REDUNDANT_PRECEDING (Ri can be removed safely)
+  Rj covers Ri, different action        -> GENERALIZATION      (Ri is an exception to Rj; usually intended)
+  partial overlap, different actions    -> CORRELATION         (outcome depends on rule order)
+
+Unreachable rules are reported once, against the first live rule that covers
+them, and are then excluded from further comparisons so they cannot generate
+misleading follow-on reports.
+
+Limitation: reachability is checked pairwise. A rule covered only by the
+UNION of several earlier rules is not reported as unreachable.
 """
 
 from enum import Enum
-import ipaddress
-from typing import List, Optional
+from typing import List, Optional, Set
+
 from src.parser import PolicyNode, RuleNode
+from src.policy_semantics import describe, rule_covers, rule_equivalent, rule_overlaps
 
 
 class AnomalyType(Enum):
     EXACT_DUPLICATE = "Exact Duplicate"
-    CONFLICT = "Conflicting Rule"
+    CONFLICT = "Direct Conflict"
     SHADOWED_RULE = "Shadowed Rule"
     REDUNDANT_SUBSUMED = "Redundant Subsumed Rule"
+    REDUNDANT_PRECEDING = "Redundant Preceding Rule"
+    GENERALIZATION = "Generalization"
+    CORRELATION = "Correlation"
 
 
 class AnomalySeverity(Enum):
-    INFO = "INFO"
-    WARNING = "WARNING"
     ERROR = "ERROR"
+    WARNING = "WARNING"
+    INFO = "INFO"
 
 
 class RuleAnomaly:
-    """Represents a detected anomaly between two rules."""
+    """A detected anomaly between two rules."""
 
     def __init__(
         self,
@@ -38,212 +58,158 @@ class RuleAnomaly:
         prior_rule: RuleNode,
         later_rule: RuleNode,
         explanation: str,
+        affected_rule: Optional[RuleNode] = None,
     ):
         self.anomaly_type = anomaly_type
         self.severity = severity
         self.prior_rule = prior_rule
         self.later_rule = later_rule
         self.explanation = explanation
+        # The rule the finding is about (usually the later one).
+        self.affected_rule = affected_rule or later_rule
 
     def __repr__(self) -> str:
-        return (
-            f"[{self.severity.value}] {self.anomaly_type.value}: "
-            f"'{self.later_rule.name}' [Line {self.later_rule.line}] affected by "
-            f"'{self.prior_rule.name}' [Line {self.prior_rule.line}] - {self.explanation}"
-        )
+        return (f"RuleAnomaly({self.anomaly_type.name}, {self.severity.name}, "
+                f"{self.prior_rule.name} <-> {self.later_rule.name})")
 
 
 class AnalysisReport:
-    """Container for all rule anomalies detected across a security policy."""
+    """All anomalies found in a policy."""
 
-    def __init__(self, policy: PolicyNode):
-        self.policy = policy
+    def __init__(self):
         self.anomalies: List[RuleAnomaly] = []
+        self.unreachable_rules: List[RuleNode] = []
 
-    def add_anomaly(self, anomaly: RuleAnomaly) -> None:
+    def add(self, anomaly: RuleAnomaly) -> None:
         self.anomalies.append(anomaly)
 
     def has_errors(self) -> bool:
         return any(a.severity == AnomalySeverity.ERROR for a in self.anomalies)
 
-    def has_warnings(self) -> bool:
-        return any(a.severity == AnomalySeverity.WARNING for a in self.anomalies)
+    def count(self, severity: AnomalySeverity) -> int:
+        return sum(1 for a in self.anomalies if a.severity == severity)
 
-    def format(self) -> str:
-        """Formats the analysis report into a readable presentation."""
-        lines = [
-            "=" * 70,
-            "RULE ANALYSIS REPORT (First-Match Semantics)",
-            "=" * 70,
-        ]
+    def format_report(self) -> str:
+        lines = ["=" * 70, "RULE ANALYSIS REPORT (First-Match Semantics, Default BLOCK)", "=" * 70]
         if not self.anomalies:
             lines.append("No rule anomalies or conflicts detected.")
             lines.append("All rules are distinct, reachable, and logically consistent.")
-            lines.append("=" * 70)
             return "\n".join(lines)
 
-        lines.append(f"Detected {len(self.anomalies)} issue(s):\n")
-        for idx, a in enumerate(self.anomalies, 1):
-            lines.append(f"Issue {idx}: [{a.severity.value}] {a.anomaly_type.value}")
-            lines.append(f"  Affects Rule   : '{a.later_rule.name}' [Line {a.later_rule.line}]")
-            lines.append(f"  Preceding Rule : '{a.prior_rule.name}' [Line {a.prior_rule.line}]")
-            lines.append(f"  Explanation    : {a.explanation}")
-            lines.append("-" * 70)
+        lines.append(
+            f"{len(self.anomalies)} finding(s): {self.count(AnomalySeverity.ERROR)} error, "
+            f"{self.count(AnomalySeverity.WARNING)} warning, {self.count(AnomalySeverity.INFO)} info"
+        )
+        for i, a in enumerate(self.anomalies, 1):
+            lines.append("")
+            lines.append(f"[{a.severity.value}] Issue #{i}: {a.anomaly_type.value}")
+            lines.append(f"  Affects     : '{a.affected_rule.name}' (Line {a.affected_rule.line})")
+            lines.append(f"  Prior Rule  : '{a.prior_rule.name}' (Line {a.prior_rule.line}) {describe(a.prior_rule)} -> {a.prior_rule.action}")
+            lines.append(f"  Later Rule  : '{a.later_rule.name}' (Line {a.later_rule.line}) {describe(a.later_rule)} -> {a.later_rule.action}")
+            lines.append(f"  Explanation : {a.explanation}")
+        if self.unreachable_rules:
+            names = ", ".join(r.name for r in self.unreachable_rules)
+            lines.append("")
+            lines.append(f"Unreachable rules (never fire): {names}")
         return "\n".join(lines)
 
 
 class RuleAnalyzer:
-    """Analyzes a security policy AST for anomalies under first-match semantics."""
+    """Pairwise anomaly detection over an ordered rule list."""
 
     def __init__(self, policy: PolicyNode):
         self.policy = policy
+        self.report = AnalysisReport()
 
     def analyze(self) -> AnalysisReport:
-        report = AnalysisReport(self.policy)
         rules = self.policy.rules
+        dead: Set[int] = set()
+        reported_redundant: Set[int] = set()
 
-        for i in range(len(rules)):
-            r_first = rules[i]
-            for j in range(i + 1, len(rules)):
-                r_second = rules[j]
-                self._compare_rules(r_first, r_second, report)
+        for j, later in enumerate(rules):
+            # 1) Is the later rule unreachable? Report against the first live rule covering it.
+            for i in range(j):
+                if i in dead:
+                    continue
+                prior = rules[i]
+                if rule_covers(prior, later):
+                    self.report.add(self._unreachable_anomaly(prior, later))
+                    self.report.unreachable_rules.append(later)
+                    dead.add(j)
+                    break
+            if j in dead:
+                continue
 
-        return report
+            # 2) Relations between two reachable rules.
+            for i in range(j):
+                if i in dead:
+                    continue
+                prior = rules[i]
+                if rule_covers(later, prior):
+                    if prior.action == later.action:
+                        if i not in reported_redundant and not self._conflicting_rule_between(rules, dead, i, j):
+                            reported_redundant.add(i)
+                            self.report.add(RuleAnomaly(
+                                AnomalyType.REDUNDANT_PRECEDING, AnomalySeverity.INFO, prior, later,
+                                f"'{prior.name}' is redundant: '{later.name}' is broader with the same action "
+                                f"({later.action}) and no rule between them overrides it, so removing "
+                                f"'{prior.name}' changes no packet's outcome.",
+                                affected_rule=prior,
+                            ))
+                    else:
+                        self.report.add(RuleAnomaly(
+                            AnomalyType.GENERALIZATION, AnomalySeverity.INFO, prior, later,
+                            f"'{prior.name}' ({prior.action}) is an exception carved out of the broader rule "
+                            f"'{later.name}' ({later.action}). This is usually intentional, but the two rules "
+                            "must never be reordered.",
+                            affected_rule=prior,
+                        ))
+                elif prior.action != later.action and rule_overlaps(prior, later):
+                    self.report.add(RuleAnomaly(
+                        AnomalyType.CORRELATION, AnomalySeverity.WARNING, prior, later,
+                        f"'{prior.name}' and '{later.name}' partially overlap with different actions. "
+                        f"Packets in the overlap get {prior.action} only because '{prior.name}' comes first; "
+                        "swapping the rules would change the policy.",
+                    ))
+        return self.report
 
-    def _compare_rules(self, r1: RuleNode, r2: RuleNode, report: AnalysisReport) -> None:
-        # Check exact condition match
-        same_protocol = (r1.protocol == r2.protocol)
-        same_port = (r1.port == r2.port)
-        same_source = (r1.source == r2.source)
-        same_action = (r1.action == r2.action)
-
-        # 1. Exact Duplicate (Identical conditions AND identical action)
-        if same_protocol and same_port and same_source and same_action:
-            report.add_anomaly(
-                RuleAnomaly(
-                    anomaly_type=AnomalyType.EXACT_DUPLICATE,
-                    severity=AnomalySeverity.WARNING,
-                    prior_rule=r1,
-                    later_rule=r2,
-                    explanation=(
-                        f"Rule '{r2.name}' has identical match conditions and action ({r1.action}) "
-                        f"as preceding rule '{r1.name}'. Under first-match semantics, '{r2.name}' is redundant."
-                    ),
+    @staticmethod
+    def _unreachable_anomaly(prior: RuleNode, later: RuleNode) -> RuleAnomaly:
+        if rule_equivalent(prior, later):
+            if prior.action == later.action:
+                return RuleAnomaly(
+                    AnomalyType.EXACT_DUPLICATE, AnomalySeverity.WARNING, prior, later,
+                    f"'{later.name}' matches exactly the same traffic as '{prior.name}' with the same "
+                    f"action ({prior.action}). It is redundant and never evaluated.",
                 )
+            return RuleAnomaly(
+                AnomalyType.CONFLICT, AnomalySeverity.ERROR, prior, later,
+                f"Contradictory actions for identical traffic: '{prior.name}' says {prior.action}, "
+                f"'{later.name}' says {later.action}. Under first-match semantics '{prior.name}' always "
+                f"wins, so '{later.name}' is unreachable.",
             )
-            return
-
-        # 2. Direct Conflict (Identical conditions BUT opposite action)
-        if same_protocol and same_port and same_source and not same_action:
-            report.add_anomaly(
-                RuleAnomaly(
-                    anomaly_type=AnomalyType.CONFLICT,
-                    severity=AnomalySeverity.ERROR,
-                    prior_rule=r1,
-                    later_rule=r2,
-                    explanation=(
-                        f"Rule '{r2.name}' specifies action {r2.action}, but preceding rule '{r1.name}' "
-                        f"specifies action {r1.action} for the exact same traffic "
-                        f"({r1.protocol} PORT {r1.port} FROM {r1.source}). "
-                        f"Under first-match semantics, '{r2.name}' will NEVER be executed."
-                    ),
-                )
+        if prior.action == later.action:
+            return RuleAnomaly(
+                AnomalyType.REDUNDANT_SUBSUMED, AnomalySeverity.INFO, prior, later,
+                f"'{later.name}' is a subset of the broader earlier rule '{prior.name}' with the same "
+                f"action ({prior.action}). It can never be reached.",
             )
-            return
-
-        # 3. Subsumption and Shadowing (r1 is broader than r2)
-        if self._is_superset(r1, r2):
-            if r1.action == r2.action:
-                report.add_anomaly(
-                    RuleAnomaly(
-                        anomaly_type=AnomalyType.REDUNDANT_SUBSUMED,
-                        severity=AnomalySeverity.INFO,
-                        prior_rule=r1,
-                        later_rule=r2,
-                        explanation=(
-                            f"Rule '{r1.name}' ({r1.protocol} PORT {r1.port} SRC {r1.source} -> {r1.action}) "
-                            f"matches a broader superset of traffic than rule '{r2.name}' "
-                            f"({r2.protocol} PORT {r2.port} SRC {r2.source} -> {r2.action}) with the same action. "
-                            f"Rule '{r2.name}' is subsumed and can be safely eliminated."
-                        ),
-                    )
-                )
-            else:
-                report.add_anomaly(
-                    RuleAnomaly(
-                        anomaly_type=AnomalyType.SHADOWED_RULE,
-                        severity=AnomalySeverity.WARNING,
-                        prior_rule=r1,
-                        later_rule=r2,
-                        explanation=(
-                            f"Preceding rule '{r1.name}' matches a superset of traffic with action {r1.action}, "
-                            f"preventing rule '{r2.name}' ({r2.action}) from ever matching. "
-                            f"Rule '{r2.name}' is completely shadowed."
-                        ),
-                    )
-                )
-
-    def _is_superset(self, r_broad: RuleNode, r_narrow: RuleNode) -> bool:
-        """Determines if r_broad matches a strict superset of r_narrow's traffic."""
-        # Protocol: 'ANY' matches any specific protocol
-        proto_superset = (r_broad.protocol == "ANY" and r_narrow.protocol != "ANY") or (r_broad.protocol == r_narrow.protocol)
-        if not proto_superset:
-            return False
-
-        # Port: 'ANY' matches any specific port
-        port_superset = (r_broad.port == "ANY" and r_narrow.port != "ANY") or (r_broad.port == r_narrow.port)
-        if not port_superset:
-            return False
-
-        # Source: 'ANY' matches everything
-        src_superset = self._is_source_superset(r_broad.source, r_narrow.source)
-        if not src_superset:
-            return False
-
-        # Must be strictly broader in at least one attribute to be a superset
-        is_strictly_broader = (
-            (r_broad.protocol == "ANY" and r_narrow.protocol != "ANY")
-            or (r_broad.port == "ANY" and r_narrow.port != "ANY")
-            or (r_broad.source == "ANY" and r_narrow.source != "ANY")
-            or self._is_strict_cidr_superset(r_broad.source, r_narrow.source)
+        return RuleAnomaly(
+            AnomalyType.SHADOWED_RULE, AnomalySeverity.ERROR, prior, later,
+            f"'{later.name}' ({later.action}) is completely shadowed by the broader earlier rule "
+            f"'{prior.name}' ({prior.action}). Its action can never take effect; if it is meant as "
+            "an exception, move it above the broader rule.",
         )
-        return is_strictly_broader
 
-    def _is_source_superset(self, broad_src: str, narrow_src: str) -> bool:
-        if broad_src == "ANY":
-            return True
-        if broad_src == narrow_src:
-            return True
-        # Check CIDR containment
-        if "/" in broad_src:
-            try:
-                net_broad = ipaddress.ip_network(broad_src, strict=False)
-                if "/" in narrow_src:
-                    net_narrow = ipaddress.ip_network(narrow_src, strict=False)
-                    return net_broad.supernet_of(net_narrow)
-                else:
-                    ip_narrow = ipaddress.ip_address(narrow_src)
-                    return ip_narrow in net_broad
-            except ValueError:
-                pass
-        return False
-
-    def _is_strict_cidr_superset(self, broad_src: str, narrow_src: str) -> bool:
-        if "/" in broad_src:
-            try:
-                net_broad = ipaddress.ip_network(broad_src, strict=False)
-                if "/" in narrow_src:
-                    net_narrow = ipaddress.ip_network(narrow_src, strict=False)
-                    return net_broad.supernet_of(net_narrow) and net_broad != net_narrow
-                else:
-                    ip_narrow = ipaddress.ip_address(narrow_src)
-                    return ip_narrow in net_broad
-            except ValueError:
-                pass
-        return False
+    @staticmethod
+    def _conflicting_rule_between(rules: List[RuleNode], dead: Set[int], i: int, j: int) -> bool:
+        target = rules[i]
+        return any(
+            k not in dead and rules[k].action != target.action and rule_overlaps(rules[k], target)
+            for k in range(i + 1, j)
+        )
 
 
 def analyze_rules(policy: PolicyNode) -> AnalysisReport:
-    """Helper function to analyze a policy AST."""
-    analyzer = RuleAnalyzer(policy)
-    return analyzer.analyze()
+    """Helper function to run rule anomaly analysis."""
+    return RuleAnalyzer(policy).analyze()

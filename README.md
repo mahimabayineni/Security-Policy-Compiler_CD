@@ -1,121 +1,98 @@
 # Domain-Specific Security Policy Compiler for Automated Rule Analysis and Optimization
 
-An educational, modular implementation of a college Compiler Design project demonstrating the translation, validation, intermediate code generation, anomaly analysis, safe optimization, and code generation for a domain-specific security policy language.
+A Compiler Design project: a complete compiler for a small security-policy language. It lexes, parses and validates firewall-style rules, detects rule anomalies, optimizes the policy at two levels (rules and intermediate code), generates an executable Python program from the IR, and **verifies** that the compiled program behaves exactly like the source policy.
 
-> [!NOTE]
-> **Academic Project Notice**: This compiler is designed for educational and demonstration purposes. It performs simulation on synthetic packet dictionaries and **does not** configure real OS firewalls, bind raw sockets, or alter actual network security settings.
-
----
-
-## 1. Project Overview
-
-In network security and cloud infrastructure, firewall and access control rules often grow into thousands of policy statements. Over time, human administrators introduce duplicate rules, contradictory/conflicting actions, and shadowed rules that waste hardware memory and lead to severe security misconfigurations.
-
-This project implements a **Domain-Specific Language (DSL) Compiler** for security policies. By treating security rules as formal language statements, the compiler parses policies through standard compiler phases, builds intermediate representations, detects logical anomalies, eliminates safe redundancies, and emits optimized, executable policy evaluation programs.
+> **Academic project notice:** the compiler only evaluates synthetic packet records (Python dictionaries). It never configures a real firewall, opens sockets, or touches network settings.
 
 ---
 
-## 2. Key Objectives & Features
+## 1. Why this project
 
-- **Formal Compiler Pipeline**: Implements all classic compiler phases (Lexing, LL(1) Parsing, Semantic Validation, Three-Address Intermediate Code, Static Analysis, Optimization, and Target Code Generation).
-- **Rule Anomaly Detection**:
-  - Exact duplicate rule detection.
-  - Policy conflict detection (opposite actions for identical traffic).
-  - Rule shadowing and subsumption identification.
-- **Formally Defined Semantics**: Explicit **First-Match Semantics** with **Default-Deny (BLOCK)** fallback.
-- **Safe Semantics-Preserving Optimization**: Prunes dead code, exact duplicates, and redundant subsumed rules without altering the evaluation decision for any packet.
-- **Executable Target Output**: Generates standalone Python evaluator programs and includes an in-memory packet simulation engine.
-- **Zero Heavy Dependencies**: Built entirely using the Python 3 standard library; tests run out of the box with standard `unittest` or `pytest`.
+Real firewalls accumulate thousands of rules. Administrators add duplicates, contradictory rules, and rules that can never fire because an earlier, broader rule always wins. These mistakes waste resources and, worse, hide security holes. Treating the policy as a **program** lets us use compiler techniques (parsing, semantic analysis, dead-code elimination, IR optimization) to find and fix them automatically.
 
 ---
 
-## 3. Compiler Pipeline Overview
+## 2. Features
+
+- **Full compiler pipeline**: lexer, LL(1) recursive-descent parser, semantic analysis, rule analysis, AST optimization, three-address code, IR optimization, code generation.
+- **Precise diagnostics**: every lexical, syntax and semantic error reports the line and column of the offending token; all semantic errors are collected in one pass.
+- **Semantic rule analysis** (Al-Shaer & Hamed classification): exact duplicates, conflicts, shadowing, subsumption, redundant preceding rules, generalization and correlation. Sources are compared by meaning, not text: the analyzer knows `INTERNAL` covers `192.168.1.0/24` and that `10.0.0.1` equals `10.0.0.1/32`.
+- **Two-level optimization**:
+  - *Policy level* (AST): removes unreachable and redundant rules, with an audit trail explaining each removal.
+  - *IR level* (peephole): constant folding, copy propagation, branch elimination, dead-code and unreachable-code elimination.
+- **IR-driven back end**: Python code is generated instruction-by-instruction from the optimized quadruples; an **IR virtual machine** can also execute the IR directly.
+- **Translation validation**: after every compilation, the original policy, the optimized IR and the generated Python are compared on one packet from *every* equivalence class, which is exhaustive for this language.
+- **Usable on your own policies and packets**: evaluate packets from the command line or a JSON file; the generated program is a standalone tool.
+- **No dependencies**: Python 3.8+ standard library only. 50 unit, regression and fuzz tests.
+
+---
+
+## 3. Pipeline
 
 ```
-Source File (.spol)
-       │
-       ▼
-[Phase 1: Lexical Analysis]        ──► Token Stream (Line & Column tracking)
-       │
-       ▼
-[Phase 2: Syntax Analysis]         ──► Abstract Syntax Tree (AST)
-       │
-       ▼
-[Phase 3: Semantic Analysis]       ──► Type, Range, Identifier & Protocol Checks
-       │
-       ▼
-[Phase 4: Intermediate Code]       ──► Three-Address Code (TAC) & Quadruples Table
-       │
-       ▼
-[Phase 5: Rule Analysis]           ──► Redundancy, Shadowing & Conflict Report
-       │
-       ▼
-[Phase 6: Policy Optimization]     ──► Pruned Minimal AST (Equivalent Semantics)
-       │
-       ▼
-[Phase 7: Code Generation]         ──► Standalone Python Evaluator & Simulated Packets
+ .spol source
+     |
+ [1] Lexical Analysis      lexer.py              tokens with line:column
+ [2] Syntax Analysis       parser.py             AST
+ [3] Semantic Analysis     semantic_analyzer.py  validated + normalized AST
+ [4] Rule Analysis         rule_analyzer.py      anomaly report
+ [5] Policy Optimization   optimizer.py          optimized AST
+ [6] IR Generation         intermediate_code.py  three-address code (quadruples)
+     IR Optimization       intermediate_code.py  peephole-optimized IR
+ [7] Code Generation       code_generator.py     standalone Python program
+     Validation            verifier.py, ir_vm.py original == IR == generated?
 ```
+
+Details: [`docs/compiler_architecture.md`](docs/compiler_architecture.md). Grammar and semantics: [`docs/grammar.md`](docs/grammar.md).
 
 ---
 
-## 4. Project Directory Structure
+## 4. Directory structure
 
 ```
-Security-Policy-Compiler/
-├── src/
-│   ├── __init__.py               # Package metadata
-│   ├── lexer.py                  # Phase 1: Tokenizer and line/column tracker
-│   ├── parser.py                 # Phase 2: Recursive-descent AST parser
-│   ├── semantic_analyzer.py      # Phase 3: Semantic checks (ports, protocols, scopes)
-│   ├── intermediate_code.py      # Phase 4: TAC & Quadruples generator
-│   ├── rule_analyzer.py          # Phase 5: Duplicate, conflict, and shadow analyzer
-│   ├── optimizer.py              # Phase 6: Semantics-preserving rule optimizer
-│   ├── code_generator.py         # Phase 7: Target Python generator & simulator
-│   └── main.py                   # Phase 8: Compiler CLI driver
-├── examples/
-│   ├── sample_policy.spol        # Standard multi-rule production policy
-│   ├── duplicate_rules.spol      # Demonstrates duplicate and subsumed rules
-│   ├── conflicting_rules.spol    # Demonstrates conflicting and shadowed rules
-│   └── invalid_policy.spol       # Demonstrates lexical, syntactic & semantic errors
-├── tests/
-│   ├── __init__.py
-│   ├── test_lexer.py             # Unit tests for tokenization & errors
-│   ├── test_parser.py            # Unit tests for grammar parsing & AST
-│   ├── test_semantic_analyzer.py # Unit tests for ports, protocols, uniqueness
-│   ├── test_rule_analyzer.py     # Unit tests for anomaly detection algorithms
-│   ├── test_optimizer.py         # Unit tests for pruning & behavior preservation
-│   └── test_code_generator.py    # Unit tests for code generation & simulation
-├── docs/
-│   ├── grammar.md                # Formal EBNF and token dictionary
-│   └── compiler_architecture.md  # Detailed system architecture & algorithms
-├── requirements.txt              # Optional pytest dependency
-├── .gitignore                    # Git exclusions
-└── README.md                     # Comprehensive project documentation
+Security-Policy-Compiler_CD-main/
+|-- src/
+|   |-- lexer.py               Phase 1  scanner
+|   |-- parser.py              Phase 2  recursive-descent parser, AST
+|   |-- semantic_analyzer.py   Phase 3  semantic checks, normalization
+|   |-- rule_analyzer.py       Phase 4  anomaly detection
+|   |-- optimizer.py           Phase 5  rule-level optimization
+|   |-- intermediate_code.py   Phase 6  TAC/quadruples + peephole optimizer
+|   |-- code_generator.py      Phase 7  IR -> Python, reference interpreter
+|   |-- ir_vm.py               IR virtual machine
+|   |-- verifier.py            translation validation
+|   |-- policy_semantics.py    set relations between rules (covers / overlaps)
+|   |-- runtime.py             source matching shared by all back ends
+|   `-- main.py                command-line driver
+|-- examples/
+|   |-- sample_policy.spol       clean policy
+|   |-- duplicate_rules.spol     duplicates and subsumed rules
+|   |-- conflicting_rules.spol   conflicts, correlation and shadowing
+|   |-- advanced_anomalies.spol  semantic analysis showcase
+|   |-- invalid_policy.spol      semantic errors
+|   `-- packets.json             sample packets for --packets
+|-- tests/                       unit, regression, pipeline and fuzz tests
+`-- docs/
+    |-- grammar.md
+    `-- compiler_architecture.md
 ```
 
 ---
 
-## 5. Domain-Specific Language (DSL) Specification
+## 5. The policy language
 
-### Grammar Summary
-Each policy consists of one or more rules structured as:
 ```spol
-RULE <identifier>
-WHEN <protocol> PORT <port_number | ANY>
-IF SOURCE <source_condition>
-THEN <ALLOW | BLOCK>
+RULE <name>
+WHEN <TCP | UDP | ICMP | ANY> PORT <1-65535 | ANY>
+IF SOURCE <ANY | UNKNOWN | INTERNAL | EXTERNAL | IPv4 address | CIDR block>
+THEN <ALLOW | BLOCK | DENY>
 ```
 
-### Supported Elements:
-- **Protocols**: `TCP`, `UDP`, `ICMP`, `ANY`
-- **Ports**: Integers `1` to `65535`, or wildcard `ANY`
-- **Source Conditions**:
-  - Named identifiers: `ANY`, `UNKNOWN`, `INTERNAL`, `EXTERNAL`
-  - Explicit IPv4 Address: e.g., `192.168.1.50`
-  - IPv4 CIDR Subnet: e.g., `10.0.0.0/24`
-- **Actions**: `ALLOW`, `BLOCK` (or `DENY`)
+- Rules are checked **top to bottom; the first match wins**. A packet that matches nothing is **blocked** (default deny).
+- `INTERNAL` = the RFC 1918 private ranges (10/8, 172.16/12, 192.168/16); `EXTERNAL` = every other address; `UNKNOWN` matches only packets labelled `UNKNOWN`.
+- ICMP has no ports, so ICMP rules use `PORT ANY` (or `PORT 0`, which means the same).
+- `DENY` is a synonym for `BLOCK`. Keywords are case-insensitive. `#` starts a comment.
 
-### Example Policy:
 ```spol
 # Block untrusted SSH
 RULE BLOCK_SSH
@@ -123,210 +100,129 @@ WHEN TCP PORT 22
 IF SOURCE UNKNOWN
 THEN BLOCK
 
-# Allow public web access
-RULE ALLOW_WEB
-WHEN TCP PORT 443
-IF SOURCE ANY
-THEN ALLOW
-
-# Allow internal DNS
-RULE ALLOW_DNS
-WHEN UDP PORT 53
-IF SOURCE INTERNAL
+# Lab machines may SSH in
+RULE ALLOW_LAB_SSH
+WHEN TCP PORT 22
+IF SOURCE 10.10.5.0/24
 THEN ALLOW
 ```
 
 ---
 
-## 6. Installation & Prerequisites
+## 6. How to run
 
-The project requires **Python 3.8+** (tested on Python 3.14). No external third-party dependencies are required to run the compiler.
+Requires Python 3.8 or newer. No installation step. Open a terminal in the project folder (the one containing `src/`). On Windows, use `py` if `python` is not recognized.
 
-### Setup:
-```powershell
-# Clone or navigate to the repository directory
-cd Security-Policy-Compiler_CD_Project
-
-# (Optional) Install pytest if you wish to run tests with pytest
-pip install -r requirements.txt
+**Full demonstration (all phases):**
 ```
-
----
-
-## 7. How to Run the Compiler
-
-### 1. Full Pipeline Demonstration (Recommended for Faculty Review)
-Compiles a policy and displays all 7 phases end-to-end:
-```powershell
 python src/main.py examples/sample_policy.spol
 ```
 
-### 2. Demonstrating Redundancy Detection & Optimization
-Compiles a policy with redundant rules and shows rule reduction:
-```powershell
-python src/main.py examples/duplicate_rules.spol
+**One phase at a time:**
+```
+python src/main.py --tokens examples/sample_policy.spol
+python src/main.py --ast examples/sample_policy.spol
+python src/main.py --analysis examples/advanced_anomalies.spol
+python src/main.py --optimize examples/duplicate_rules.spol
+python src/main.py --ir examples/conflicting_rules.spol
+python src/main.py examples/invalid_policy.spol        # error diagnostics
 ```
 
-### 3. Demonstrating Conflict & Shadowed Rule Detection
-Compiles a policy with conflicting actions and displays the anomaly report:
-```powershell
-python src/main.py examples/conflicting_rules.spol
+**Using it on your own policy:** write a `.spol` file, then test any packets against it:
+```
+python src/main.py --packet "TCP 22 10.10.5.7" --packet "TCP 22 UNKNOWN" my_policy.spol
+python src/main.py --packets examples/packets.json examples/advanced_anomalies.spol
+```
+A packet is `PROTOCOL PORT SOURCE`, where SOURCE is an IPv4 address or a label (`UNKNOWN`, `INTERNAL`, `EXTERNAL`). A packets file is a JSON list of `{"protocol": ..., "port": ..., "source": ...}` objects.
+
+**Generating the compiled program:**
+```
+python src/main.py -o output/my_policy.py my_policy.spol
+python output/my_policy.py TCP 22 10.10.5.7               # one packet
+python output/my_policy.py --packets examples/packets.json # many packets
+python output/my_policy.py                                # demo packets
 ```
 
-### 4. Demonstrating Error Diagnostics
-Runs the compiler on an invalid policy to verify graceful error handling:
-```powershell
-python src/main.py examples/invalid_policy.spol
-```
+### Command-line options
 
-### 5. Emitting Generated Python Code to File
-```powershell
-python src/main.py --output output/compiled_firewall.py examples/sample_policy.spol
-```
-
-### Command-Line Options:
-| Flag | Description |
+| Option | Effect |
 |---|---|
-| `--tokens` | Display token table only |
-| `--ast` | Display Abstract Syntax Tree only |
-| `--ir` | Display Intermediate Three-Address Code and Quadruples table only |
-| `--analysis` | Display rule conflict and anomaly findings only |
-| `--optimize` | Run optimization pass and show optimized rule statistics |
-| `-o`, `--output <file>` | Save generated target Python policy script to a file |
-| `--simulate` | Run packet simulation test suite |
-| `--all` | Display all pipeline phases in detail |
+| `--tokens`, `--ast`, `--ir`, `--analysis`, `--optimize` | Show that phase in detail |
+| `--simulate` | Run the demo packets |
+| `--all` | Show every phase (default when no view option is given) |
+| `--packet "PROTO PORT SRC"` | Evaluate a packet (repeatable) |
+| `--packets FILE` | Evaluate packets from a JSON file |
+| `-o FILE` | Write the generated Python program |
+| `--no-optimize` | Disable optimization (O0) |
+| `-O2`, `--aggressive` | Also remove BLOCK rules already implied by the default BLOCK |
+| `--strict` | Fail when the analysis reports ERROR-level anomalies (conflicts, shadowing) |
+
+The exit code is 0 on success and 1 on any error, so the compiler can be used in scripts.
 
 ---
 
-## 8. Automated Testing
+## 7. Tests
 
-All phases are backed by a comprehensive unit test suite covering:
-- Lexer tokenization, comments, and invalid character diagnostics.
-- Recursive-descent parser AST creation and syntax error detection.
-- Semantic validation of ports (1-65535), protocols, rule names, and ICMP compatibility.
-- Duplicate, conflict, and shadowing anomaly detection algorithms.
-- **Semantic equivalence preservation**: Verifies that evaluating packets against the original AST and the optimized AST produces identical decisions across all tests.
-- Syntactic validity and execution of generated Python code.
-
-### Run Tests with Python standard `unittest`:
-```powershell
-python -m unittest discover tests
 ```
-
-### Or with `pytest` (if installed):
-```powershell
-pytest -v
+python -m unittest discover -s tests -t .
 ```
+(or `pytest` if installed). The suite covers every phase, a regression test for each bug fixed in v2.0, end-to-end compilation of all examples, the generated program's command line, and a seeded fuzz test that compiles hundreds of random policies and validates each one.
 
 ---
 
-## 9. Expected Demonstration Output
+## 8. Example output (abridged)
 
-When executing `python src/main.py examples/sample_policy.spol`, the compiler outputs:
+```
+[*] Phase 4: Rule Anomaly Analysis
+[ERROR] Issue #3: Shadowed Rule
+  Affects     : 'ALLOW_EXTERNAL_HTTPS' (Line 28)
+  Prior Rule  : 'BLOCK_ALL_EXTERNAL' (Line 20) ANY PORT ANY SRC EXTERNAL -> BLOCK
+  ...
+[*] Phase 5: Policy Optimization
+Original Rule Count  : 4
+Optimized Rule Count : 2
+  1. [ELIMINATE_DEAD_CONFLICT] Removed 'BLOCK_HTTP_ANY' (Line 14)
+  2. [ELIMINATE_SHADOWED] Removed 'ALLOW_EXTERNAL_HTTPS' (Line 28)
 
-```text
-======================================================================
- COMPILING: examples/sample_policy.spol
-======================================================================
-
-[*] Phase 1: Lexical Analysis...
-    [+] Success: 67 tokens generated.
-+------------+------------------+--------------------------+
-| LINE:COL   | TOKEN TYPE       | VALUE                    |
-+------------+------------------+--------------------------+
-| 7:1        | KW_RULE          | RULE                     |
-| 7:6        | IDENTIFIER       | BLOCK_SSH_UNKNOWN        |
-...
-
-[*] Phase 2: Syntax Analysis (Parser)...
-    [+] Success: AST constructed with 6 rule node(s).
-Policy AST Root
-+-- Rule: BLOCK_SSH_UNKNOWN [Line 7]
-|   +-- Protocol : TCP
-|   +-- Port     : 22
-|   +-- Source   : UNKNOWN
-|   \-- Action   : BLOCK
-...
-
-[*] Phase 3: Semantic Analysis...
-[PASS] Semantic Analysis: 0 errors detected. Policy is semantically valid.
-
-[*] Phase 4: Intermediate Representation (IR)...
-    [+] Generated 51 IR Quadruples.
-# --- Three-Address Code (TAC) Representation ---
-LABEL_BLOCK_SSH_UNKNOWN:
+[*] Phase 6: Intermediate Code (from the optimized AST)
+IR quadruples: 19 -> 13 after peephole optimization
+  - Constant folding (tests against ANY -> TRUE): 3
+  - Copy/constant propagation (AND with TRUE): 3
+  - Dead code elimination (unused temporaries): 4
+R1_ALLOW_HTTP_ANY:
     t0 = (packet.protocol == 'TCP')
-    t1 = (packet.port == 22)
+    t1 = (packet.port == 80)
     t2 = t0 AND t1
-    t3 = MATCH_SOURCE(packet.source, 'UNKNOWN')
-    t4 = t2 AND t3
-    IF NOT t4 GOTO LABEL_RULE_1
-    RETURN ACTION(BLOCK) [Rule: BLOCK_SSH_UNKNOWN]
+    IF NOT t2 GOTO R2_BLOCK_ALL_EXTERNAL
+    RETURN ACTION(ALLOW) [Rule: ALLOW_HTTP_ANY]
 ...
-
-[*] Phase 5: Rule Analysis (First-Match Semantics)...
-======================================================================
-RULE ANALYSIS REPORT (First-Match Semantics)
-======================================================================
-No rule anomalies or conflicts detected.
-All rules are distinct, reachable, and logically consistent.
-
-[*] Phase 6: Policy Optimization...
-======================================================================
-OPTIMIZATION REPORT
-======================================================================
-Original Rule Count  : 6
-Optimized Rule Count : 6
-Rules Eliminated     : 0
-No optimizations needed. Policy is already minimal.
-
-[*] Phase 7: Code Generation (Target: Executable Python Policy)...
-[+] Standalone Python policy generated.
-
-[*] Safe Policy Simulation Demo (Testing Sample Packets):
-+----------------------------------------------------------------------+
-| PACKET (Proto:Port From Source)    | MATCHED RULE       | ACTION     |
-+----------------------------------------------------------------------+
-| TCP:22 src=UNKNOWN                 | BLOCK_SSH_UNKNOWN  | BLOCK      |
-| TCP:443 src=192.168.1.100          | ALLOW_HTTPS        | ALLOW      |
-| TCP:80 src=ANY                     | ALLOW_HTTP         | ALLOW      |
-| UDP:53 src=8.8.8.8                 | DEFAULT_FALLBACK   | BLOCK      |
-| ICMP:0 src=INTERNAL                | ALLOW_PING         | ALLOW      |
-+----------------------------------------------------------------------+
-======================================================================
- COMPILATION COMPLETED SUCCESSFULLY
-======================================================================
+[*] Translation Validation
+    [PASS] Equivalence check (original AST vs optimized IR vs generated Python):
+           128 packet classes, 0 mismatch(es).
 ```
 
 ---
 
-## 10. Guide for Faculty Review / Viva
+## 9. Guide for review / viva
 
-When demonstrating this project to your faculty, highlight these fundamental **Compiler Design** concepts:
-
-1. **Front-End Design**:
-   - **Lexer**: Point out the stateful scanner in `src/lexer.py` that computes token categories, string values, and `line:column` offsets.
-   - **Parser**: Show `src/parser.py`, explaining that it is a **Recursive-Descent Parser** enforcing the context-free grammar defined in `docs/grammar.md` and producing a typed AST (`PolicyNode`, `RuleNode`).
-2. **Static Semantics**:
-   - Explain how `src/semantic_analyzer.py` catches contextual violations that grammars cannot detect (such as port ranges $1..65535$, rule name duplicate collisions, and transport port incompatibilities with ICMP).
-3. **Intermediate Code**:
-   - Show `src/intermediate_code.py`. Explain how declarative high-level rules are lowered into **Three-Address Code (TAC)** quadruples `(Op, Arg1, Arg2, Result)` with temporary variables (`t0`, `t1`, ...) and jump labels.
-4. **Policy Semantics & Optimization**:
-   - Clarify the difference between compile-time anomaly detection (`src/rule_analyzer.py`) and optimizer dead-code elimination (`src/optimizer.py`).
-   - Emphasize that **First-Match Semantics** guarantees that optimizations never alter the policy's outcome on any packet.
-5. **Back-End (Code Generation)**:
-   - Show `src/code_generator.py`, which generates a production-ready Python packet evaluator function `evaluate_packet()`.
+1. **Front end**: the lexer tracks line:column; the parser is recursive descent over an LL(1) grammar (one method per production, one-token lookahead, no backtracking).
+2. **Semantic analysis**: checks a grammar cannot express (port ranges, unique names, ICMP has no ports). Errors are collected, not stop-at-first, and point at the exact token.
+3. **Rule analysis vs optimization**: analysis *reports* problems (some intentional, like generalization); optimization *removes* only what provably changes nothing.
+4. **Why removing a shadowed rule is safe**: under first-match semantics, every packet a shadowed rule matches is already caught by the earlier rule, so it can never fire.
+5. **Two levels of optimization**: whole rules on the AST, then individual instructions in the IR. Example: `WHEN ANY PORT ANY` produces tests that constant folding turns into `TRUE` and dead-code elimination deletes.
+6. **IR is the real interface**: the code generator and the VM both consume the optimized quadruples.
+7. **Correctness**: translation validation compares original, IR and generated code on every packet equivalence class after each compilation, plus fuzz testing.
 
 ---
 
-## 11. Current Limitations & Future Enhancements
+## 10. Limitations and future work
 
-### Current Limitations:
-- Supports IPv4 address matching and standard CIDR notation; IPv6 notation is not currently implemented.
-- Evaluates individual packets independently; does not maintain stateful connection tracking (e.g. TCP handshakes).
-- Filtering criteria are limited to protocol, destination port, and source address.
+- Reachability is checked pairwise; a rule covered only by the *union* of earlier rules is not flagged (it is still compiled correctly).
+- IPv4 only; no port ranges (`PORT 8000-8080`), no destination addresses, no stateful inspection.
+- Future: port ranges, destination matching, union-based shadowing detection (e.g. with interval/BDD representations), and back ends for `iptables`/`nftables` or eBPF.
 
-### Future Enhancements:
-- **Port Ranges**: Support continuous port ranges in syntax (e.g., `PORT 8000-8080`).
-- **Destination Address & Stateful Inspection**: Support destination subnets and state tracking (`ESTABLISHED`, `RELATED`).
-- **Binary / BPF Target Generation**: Extend the code generator back-end to compile policies into eBPF byte code or iptables scripts.
+---
+
+## 11. Reference
+
+E. Al-Shaer and H. Hamed, "Firewall Policy Advisor for Anomaly Discovery and Rule Editing," *IFIP/IEEE IM*, 2003; "Discovery of Policy Anomalies in Distributed Firewalls," *IEEE INFOCOM*, 2004.

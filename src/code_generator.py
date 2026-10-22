@@ -1,255 +1,243 @@
 """
-Phase 7: Code Generation & Safe Simulation (code_generator.py)
+Phase 7: Code Generation (code_generator.py)
 
-Generates standalone, readable Python code that implements the compiled policy.
-Provides an in-memory packet evaluator for safe simulation.
+Translates the optimized IR (quadruples) into a standalone Python program.
+Each IR instruction maps to one Python statement:
 
-Academic Note: Evaluates purely simulated packet records (Python dictionaries).
-Never accesses OS networking, sockets, or real firewall components.
+  TEST_PROTO t, P     ->  t = (proto == 'P')
+  TEST_PORT  t, N     ->  t = (port == N)
+  TEST_SRC   t, S     ->  t = match_source(src, 'S')
+  AND        t, a, b  ->  t = a and b
+  ASSIGN     t, TRUE  ->  t = True
+  IF_FALSE_GOTO t, L  ->  if t:   (L must be the next label: a structured forward jump)
+  RETURN_ACTION A, R  ->  return {...}
+  LABEL L             ->  # L:
+
+The source-matching runtime (runtime.py) is copied into the output, so the
+generated program behaves exactly like the compiler's own simulator.
+
+This module also holds the reference AST interpreter (evaluate_packet), which
+serves as the "specification" the compiled code is verified against.
+
+ACADEMIC SIMULATION ONLY: generated code evaluates plain Python dictionaries.
+It never touches sockets, interfaces, or real firewall configuration.
 """
 
-import ipaddress
-from typing import Any, Dict, List, Optional
-from src.parser import PolicyNode, RuleNode
+import inspect
+import json
+from typing import Any, Dict, List, Union
+
+from src import runtime
+from src.intermediate_code import IntermediateProgram, Quadruple, generate_ir, optimize_ir
+from src.parser import PolicyNode
+from src.policy_semantics import effective_port
+from src.runtime import match_source
+
+
+class CodeGenError(Exception):
+    pass
 
 
 class SimulatedPacket:
-    """Represents a simulated packet data record."""
+    """A synthetic packet for simulation."""
 
     def __init__(self, protocol: str, port: int, source: str):
         self.protocol = protocol.upper()
-        self.port = int(port)
-        self.source = source.strip()
+        self.port = port
+        self.source = source
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "protocol": self.protocol,
-            "port": self.port,
-            "source": self.source,
-        }
-
-    def __repr__(self) -> str:
-        return f"Packet({self.protocol}:{self.port}, src='{self.source}')"
+        return {"protocol": self.protocol, "port": self.port, "source": self.source}
 
 
+# ---------------------------------------------------------------------------
+# Reference semantics: AST interpreter
+# ---------------------------------------------------------------------------
 def match_source_condition(packet_source: str, rule_source: str) -> bool:
-    """Safely checks if packet source matches a rule's source criteria."""
-    rule_src = rule_source.strip().upper()
-    pkt_src = packet_source.strip()
-    pkt_src_upper = pkt_src.upper()
-
-    # Rule matches ANY
-    if rule_src == "ANY":
-        return True
-
-    # Exact named match (e.g. UNKNOWN == UNKNOWN, INTERNAL == INTERNAL)
-    if pkt_src_upper == rule_src:
-        return True
-
-    # Named categories vs IP addresses
-    if rule_src == "INTERNAL":
-        try:
-            ip = ipaddress.ip_address(pkt_src)
-            return ip.is_private
-        except ValueError:
-            return False
-
-    if rule_src == "EXTERNAL":
-        try:
-            ip = ipaddress.ip_address(pkt_src)
-            return not ip.is_private
-        except ValueError:
-            return True  # Non-internal or external label
-
-    if rule_src == "UNKNOWN":
-        return pkt_src_upper == "UNKNOWN"
-
-    # CIDR subnet match (e.g., rule specifies 192.168.1.0/24)
-    if "/" in rule_source:
-        try:
-            network = ipaddress.ip_network(rule_source, strict=False)
-            ip = ipaddress.ip_address(pkt_src)
-            return ip in network
-        except ValueError:
-            return False
-
-    # Exact IP address match
-    try:
-        rule_ip = ipaddress.ip_address(rule_source)
-        pkt_ip = ipaddress.ip_address(pkt_src)
-        return rule_ip == pkt_ip
-    except ValueError:
-        return rule_source.lower() == pkt_src.lower()
+    """Kept for backward compatibility; delegates to the shared runtime."""
+    return match_source(packet_source, rule_source)
 
 
 def evaluate_packet(policy: PolicyNode, packet: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Evaluates a single simulated packet against the policy AST using First-Match semantics.
-    Returns: {"action": "ALLOW"|"BLOCK", "matched_rule": str, "packet": dict}
-    """
-    pkt_proto = str(packet.get("protocol", "")).upper()
+    """Evaluates a packet against the AST under first-match, default-BLOCK semantics."""
+    pkt_proto = str(packet.get("protocol", "")).strip().upper()
     pkt_port = int(packet.get("port", 0))
-    pkt_src = str(packet.get("source", ""))
+    pkt_src = str(packet.get("source", "")).strip()
 
     for rule in policy.rules:
-        # 1. Protocol check
         if rule.protocol != "ANY" and rule.protocol != pkt_proto:
             continue
-
-        # 2. Port check
-        if rule.port != "ANY" and int(rule.port) != pkt_port:
+        port = effective_port(rule)
+        if port != "ANY" and int(port) != pkt_port:
             continue
-
-        # 3. Source check
-        if not match_source_condition(pkt_src, rule.source):
+        if not match_source(pkt_src, rule.source):
             continue
+        return {"action": rule.action, "matched_rule": rule.name, "reason": f"Matched rule '{rule.name}'"}
 
-        # First match found!
-        return {
-            "action": rule.action,
-            "matched_rule": rule.name,
-            "matched_line": rule.line,
-            "packet": packet,
-            "reason": f"Matched rule '{rule.name}' ({rule.protocol}:{rule.port} from {rule.source})",
-        }
-
-    # Default-Deny Fallback
-    return {
-        "action": "BLOCK",
-        "matched_rule": "DEFAULT_FALLBACK",
-        "matched_line": -1,
-        "packet": packet,
-        "reason": "No policy rule matched. Default policy is BLOCK.",
-    }
+    return {"action": "BLOCK", "matched_rule": "DEFAULT_FALLBACK",
+            "reason": "No matching rule found. Default BLOCK policy applied."}
 
 
 def simulate_packets(policy: PolicyNode, packets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Evaluates a batch of simulated packets against the policy."""
-    return [evaluate_packet(policy, pkt) for pkt in packets]
+    """Evaluates a list of packets with the reference interpreter."""
+    return [{"packet": p, **evaluate_packet(policy, p)} for p in packets]
 
 
-def generate_python_code(policy: PolicyNode) -> str:
+# ---------------------------------------------------------------------------
+# Back end: IR -> Python
+# ---------------------------------------------------------------------------
+def _runtime_source() -> str:
+    text = inspect.getsource(runtime)
+    marker = "# --- runtime begin ---"
+    return text[text.index(marker) + len(marker):].strip() + "\n"
+
+
+def _next_label(quads: List[Quadruple], idx: int):
+    for q in quads[idx + 1:]:
+        if q.op == "LABEL":
+            return q.result
+    return None
+
+
+def _emit_body(quads: List[Quadruple]) -> List[str]:
+    lines: List[str] = []
+    in_branch = False
+    for idx, q in enumerate(quads):
+        op = q.op
+        if op == "LABEL":
+            in_branch = False
+            lines.append(f"    # {q.result}:")
+            continue
+        if op == "COMMENT":
+            lines.append(f"    # {q.arg1}")
+            continue
+        if op in ("IF_FALSE_GOTO", "GOTO"):
+            if q.result != _next_label(quads, idx):
+                raise CodeGenError(f"Unstructured jump to '{q.result}' cannot be translated")
+            if op == "GOTO":
+                continue
+            if in_branch:
+                raise CodeGenError("Nested conditional branch in one basic block")
+            lines.append(f"    if {q.arg1}:")
+            in_branch = True
+            continue
+
+        ind = "        " if in_branch else "    "
+        if op == "TEST_PROTO":
+            lines.append(f"{ind}{q.result} = (proto == {q.arg1!r})")
+        elif op == "TEST_PORT":
+            lines.append(f"{ind}{q.result} = (port == {int(q.arg1)})")
+        elif op == "TEST_SRC":
+            lines.append(f"{ind}{q.result} = match_source(src, {q.arg1!r})")
+        elif op == "AND":
+            lines.append(f"{ind}{q.result} = {q.arg1} and {q.arg2}")
+        elif op == "ASSIGN":
+            lines.append(f"{ind}{q.result} = {q.arg1 == 'TRUE'}")
+        elif op == "RETURN_ACTION":
+            if q.arg2 == "DEFAULT_FALLBACK":
+                reason = "No matching rule found. Default BLOCK policy applied."
+            else:
+                reason = f"Matched rule '{q.arg2}'"
+            lines.append(f"{ind}return {{'action': {q.arg1!r}, 'matched_rule': {q.arg2!r}, 'reason': {reason!r}}}")
+        else:
+            raise CodeGenError(f"Unknown IR operator '{op}'")
+    return lines
+
+
+DEMO_PACKETS = [
+    {"protocol": "TCP", "port": 22, "source": "UNKNOWN"},
+    {"protocol": "TCP", "port": 443, "source": "192.168.1.100"},
+    {"protocol": "TCP", "port": 22, "source": "192.168.1.25"},
+    {"protocol": "TCP", "port": 80, "source": "203.0.113.9"},
+    {"protocol": "UDP", "port": 53, "source": "8.8.8.8"},
+    {"protocol": "ICMP", "port": 0, "source": "INTERNAL"},
+]
+
+_MAIN_TEMPLATE = '''
+
+DEMO_PACKETS = {demo}
+
+
+def _parse_cli_packet(args):
+    if len(args) != 3:
+        raise SystemExit("usage: python {{prog}} PROTOCOL PORT SOURCE   e.g.  TCP 22 10.0.0.5".format(prog=sys.argv[0]))
+    return {{"protocol": args[0], "port": int(args[1]), "source": args[2]}}
+
+
+def _main(argv):
+    if not argv:
+        packets = DEMO_PACKETS
+    elif argv[0] == "--packets":
+        with open(argv[1], encoding="utf-8") as fh:
+            packets = json.load(fh)
+    else:
+        packets = [_parse_cli_packet(argv)]
+    for pkt in packets:
+        res = evaluate_packet(pkt)
+        print("{{:<5}} {{:<6}} {{:<20}} -> {{:<6}} ({{}})".format(
+            str(pkt.get("protocol", "")).upper(), pkt.get("port", 0), pkt.get("source", ""),
+            res["action"], res["matched_rule"]))
+
+
+if __name__ == "__main__":
+    _main(sys.argv[1:])
+'''
+
+
+def generate_python_code(program: Union[PolicyNode, IntermediateProgram], source_name: str = "<policy>",
+                         rule_count: int = None) -> str:
+    """Generates a standalone Python policy from an IR program.
+
+    Passing a PolicyNode is also accepted: its IR is generated and peephole-optimized first.
     """
-    Generates standalone, readable Python target code that executes the compiled policy.
-    """
-    code_lines = [
-        '"""',
-        'Auto-Generated Security Policy Evaluator',
-        'Compiled by: Domain-Specific Security Policy Compiler',
-        'Semantics  : First-Match with Default-Deny (BLOCK)',
-        '"""',
-        '',
-        'import ipaddress',
-        'from typing import Any, Dict',
-        '',
-        '',
-        'def _match_source(pkt_src: str, rule_src: str) -> bool:',
-        '    rule_src_u = rule_src.strip().upper()',
-        '    pkt_src_u = pkt_src.strip().upper()',
-        '    if rule_src_u == "ANY":',
-        '        return True',
-        '    if pkt_src_u == rule_src_u:',
-        '        return True',
-        '    if rule_src_u == "INTERNAL":',
-        '        try:',
-        '            return ipaddress.ip_address(pkt_src).is_private',
-        '        except ValueError:',
-        '            return False',
-        '    if rule_src_u == "EXTERNAL":',
-        '        try:',
-        '            return not ipaddress.ip_address(pkt_src).is_private',
-        '        except ValueError:',
-        '            return True',
-        '    if rule_src_u == "UNKNOWN":',
-        '        return pkt_src_u == "UNKNOWN"',
-        '    if "/" in rule_src:',
-        '        try:',
-        '            net = ipaddress.ip_network(rule_src, strict=False)',
-        '            return ipaddress.ip_address(pkt_src) in net',
-        '        except ValueError:',
-        '            return False',
-        '    try:',
-        '        return ipaddress.ip_address(rule_src) == ipaddress.ip_address(pkt_src)',
-        '    except ValueError:',
-        '        return rule_src.lower() == pkt_src.lower()',
-        '',
-        '',
-        'def evaluate_packet(packet: Dict[str, Any]) -> Dict[str, Any]:',
-        '    """Evaluates an incoming packet dictionary against compiled policy rules."""',
-        '    proto = str(packet.get("protocol", "")).upper()',
-        '    port = int(packet.get("port", 0))',
-        '    src = str(packet.get("source", ""))',
-        '',
+    if isinstance(program, PolicyNode):
+        rule_count = len(program.rules) if rule_count is None else rule_count
+        program, _ = optimize_ir(generate_ir(program))
+    if rule_count is None:
+        rule_count = len(program.ast.rules) if program.ast is not None else 0
+
+    # Windows paths contain backslashes, which are escape sequences inside a docstring.
+    source_name = str(source_name).replace("\\", "/").replace('"' * 3, "'" * 3)
+    header = f'''"""
+Auto-generated security policy evaluator.
+Compiled by : Domain-Specific Security Policy Compiler v2.0
+Source      : {source_name}
+Rules       : {rule_count} (after optimization)
+Semantics   : first-match, default BLOCK
+Target      : Python 3 (generated from the optimized IR)
+
+Usage:
+  python <this file>                         run the built-in demo packets
+  python <this file> TCP 22 10.0.0.5         evaluate one packet
+  python <this file> --packets packets.json  evaluate a JSON list of packets
+
+ACADEMIC SIMULATION ONLY - evaluates plain dictionaries, never real traffic.
+"""
+
+import json
+import sys
+'''
+    body = _emit_body(program.quadruples)
+    func = [
+        "",
+        "",
+        "def evaluate_packet(packet):",
+        '    """Returns {action, matched_rule, reason} for a packet dict {protocol, port, source}."""',
+        "    proto = str(packet.get('protocol', '')).strip().upper()",
+        "    port = int(packet.get('port', 0))",
+        "    src = str(packet.get('source', '')).strip()",
+        *body,
     ]
-
-    for idx, rule in enumerate(policy.rules, 1):
-        conditions = []
-        if rule.protocol != "ANY":
-            conditions.append(f'proto == "{rule.protocol}"')
-        if rule.port != "ANY":
-            conditions.append(f'port == {rule.port}')
-        if rule.source.upper() != "ANY":
-            conditions.append(f'_match_source(src, "{rule.source}")')
-
-        cond_expr = " and ".join(conditions) if conditions else "True"
-
-        code_lines.append(f'    # Rule {idx}: {rule.name} [Line {rule.line}]')
-        code_lines.append(f'    if {cond_expr}:')
-        code_lines.append('        return {')
-        code_lines.append(f'            "action": "{rule.action}",')
-        code_lines.append(f'            "matched_rule": "{rule.name}",')
-        code_lines.append(f'            "reason": "Matched Rule {rule.name} (action: {rule.action})"')
-        code_lines.append('        }')
-        code_lines.append('')
-
-    # Default fallback
-    code_lines.extend([
-        '    # Default Fallback (First-Match Default Deny)',
-        '    return {',
-        '        "action": "BLOCK",',
-        '        "matched_rule": "DEFAULT_FALLBACK",',
-        '        "reason": "No policy rule matched. Default policy is BLOCK."',
-        '    }',
-        '',
-        '',
-        'if __name__ == "__main__":',
-        '    # Demonstration with sample packets',
-        '    sample_packets = [',
-        '        {"protocol": "TCP", "port": 22, "source": "UNKNOWN"},',
-        '        {"protocol": "TCP", "port": 443, "source": "192.168.1.50"},',
-        '        {"protocol": "TCP", "port": 80, "source": "10.0.0.1"},',
-        '        {"protocol": "UDP", "port": 53, "source": "8.8.8.8"},',
-        '    ]',
-        '    print("=" * 60)',
-        '    print("EXECUTING COMPILED SECURITY POLICY SIMULATION")',
-        '    print("=" * 60)',
-        '    for p in sample_packets:',
-        '        res = evaluate_packet(p)',
-        '        print(f"Packet: {p} -> ACTION: {res[\'action\']} ({res[\'reason\']})")',
-        '    print("=" * 60)',
-    ])
-
-    return "\n".join(code_lines)
+    demo = json.dumps(DEMO_PACKETS, indent=4)
+    return header + "\n" + _runtime_source() + "\n".join(func) + "\n" + _MAIN_TEMPLATE.format(demo=demo)
 
 
 def format_simulation_table(results: List[Dict[str, Any]]) -> str:
-    """Formats simulation outcomes into an ASCII presentation table."""
-    col_pkt = 34
-    col_rule = 18
-    col_action = 10
-    total_len = col_pkt + col_rule + col_action + 10
-    sep = "+" + "-" * (total_len - 2) + "+"
-
-    lines = [
-        sep,
-        f"| {'PACKET (Proto:Port From Source)':<{col_pkt}} | {'MATCHED RULE':<{col_rule}} | {'ACTION':<{col_action}} |",
-        sep,
-    ]
-    for r in results:
-        pkt = r["packet"]
-        pkt_str = f"{pkt.get('protocol')}:{pkt.get('port')} src={pkt.get('source')}"
-        rule_str = r.get("matched_rule", "")
-        action_str = r.get("action", "")
-        lines.append(f"| {pkt_str:<{col_pkt}} | {rule_str:<{col_rule}} | {action_str:<{col_action}} |")
-    lines.append(sep)
+    border = "+" + "-" * 38 + "+" + "-" * 26 + "+" + "-" * 10 + "+"
+    lines = [border, f"| {'PACKET (Proto:Port src=Source)':<36} | {'MATCHED RULE':<24} | {'ACTION':<8} |", border]
+    for res in results:
+        p = res["packet"]
+        desc = f"{str(p.get('protocol', '')).upper()}:{p.get('port', 0)} src={p.get('source', '')}"
+        lines.append(f"| {desc[:36]:<36} | {str(res['matched_rule'])[:24]:<24} | {res['action']:<8} |")
+    lines.append(border)
     return "\n".join(lines)

@@ -77,17 +77,45 @@ PrefixLength    ::= [0-9]{1,2}         (* Semantically constrained to 0-32 *)
 
 ## 4. Semantic Constraints
 
-Even if a policy conforms to the syntactic EBNF grammar, the semantic analyzer applies the following semantic rules:
+Even if a policy conforms to the syntactic EBNF grammar, the semantic analyzer applies the following rules. Every diagnostic reports the line and column of the offending token.
 
 1. **Unique Rule Identifiers**: Every rule name in a policy must be unique. Duplicate names cause a fatal semantic error.
-2. **Valid Port Range**: Port numbers must satisfy \( 1 \le \text{port} \le 65535 \) or be `ANY`.
-3. **Protocol-Port Compatibility**: ICMP is a network-layer protocol that does not use transport port numbers. ICMP rules must specify port `ANY` or `0`.
-4. **Valid IPv4 / CIDR**: IP addresses must consist of valid 4-octet values (0–255 each) and CIDR prefixes between 0 and 32.
-5. **Supported Actions**: Only `ALLOW` and `BLOCK` are valid target actions.
+2. **Supported Protocols**: `TCP`, `UDP`, `ICMP` or `ANY`. Other names (e.g. `FTP`) parse but are rejected here with a specific message.
+3. **Valid Port Range**: Port numbers must satisfy \( 1 \le \text{port} \le 65535 \) or be `ANY`.
+4. **Protocol-Port Compatibility**: ICMP is a network-layer protocol without transport ports. ICMP rules must use port `ANY` or `0`; both mean the same thing and are normalized to `ANY`.
+5. **Valid IPv4 / CIDR**: IP addresses must have four octets in 0-255 and CIDR prefixes must be 0-32.
+6. **Supported Actions**: Only `ALLOW` and `BLOCK` are valid. `DENY` is accepted as a synonym and normalized to `BLOCK` by the parser.
+
+Non-fatal **warnings** are issued for a CIDR with host bits set (e.g. `192.168.1.77/24` is treated as `192.168.1.0/24`) and for `0.0.0.0/0` (which is the same as `ANY`).
+
+Keywords are case-insensitive: `SOURCE internal` is the same as `SOURCE INTERNAL`.
 
 ---
 
-## 5. Example Policy Snippet
+## 5. Meaning of a Policy
+
+**Evaluation**: rules are checked top to bottom; the first rule whose protocol, port and source all match decides the action. If no rule matches, the packet is blocked (**default deny**).
+
+**Packets** are records `{protocol, port, source}`. A packet source is either an IPv4 address or a label (`UNKNOWN`, `INTERNAL`, `EXTERNAL`) for traffic whose address is not known.
+
+**Source conditions**:
+
+| Rule source | Matches |
+|---|---|
+| `ANY` | every packet |
+| `INTERNAL` | addresses in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (RFC 1918), and packets labelled `INTERNAL` |
+| `EXTERNAL` | every other IPv4 address, and packets labelled `EXTERNAL` |
+| `UNKNOWN` | only packets labelled `UNKNOWN` |
+| IP address | exactly that address (same as `/32`) |
+| CIDR block | addresses inside the block |
+
+A label never matches a different label or an address-based rule (an `INTERNAL`-labelled packet does not match `SOURCE 10.0.0.0/8`, because its actual address is unknown).
+
+The analyzer and optimizer use these same definitions, so they know, for example, that `INTERNAL` covers `192.168.1.0/24`.
+
+---
+
+## 6. Example Policy Snippet
 
 ```spol
 RULE BLOCK_SSH

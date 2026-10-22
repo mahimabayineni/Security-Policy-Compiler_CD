@@ -1,6 +1,6 @@
 # ==========================================
 # Security Policy with Conflicting & Shadowed Rules
-# Used to demonstrate Phase 5 (Analysis) & Phase 6 (Optimizer Dead Code Pruning)
+# Used to demonstrate Phase 4 (Rule Analysis) & Phase 5 (Optimization: dead-rule elimination)
 # ==========================================
 
 # Rule 1: Allow all web traffic on port 80

@@ -1,169 +1,260 @@
 """
-Phase 4: Intermediate Representation (intermediate_code.py)
+Phase 6: Intermediate Code Generation and IR Optimization (intermediate_code.py)
 
-Translates the Abstract Syntax Tree (AST) into a machine-independent
-Intermediate Representation (IR), featuring:
-1. Linearized Three-Address Code (TAC)
-2. Quadruple instruction formatting (Op, Arg1, Arg2, Result)
+Lowers the OPTIMIZED policy AST into Three-Address Code (TAC), stored as
+quadruples (op, arg1, arg2, result). This IR is the input to the back end:
+the IR virtual machine (ir_vm.py) executes it and the code generator
+translates it to Python.
 
-Provides clear, printable IR for Compiler Design faculty demonstration.
+Instruction set
+  LABEL          result=label
+  COMMENT        arg1=text
+  TEST_PROTO     arg1=protocol           result=temp    temp = packet.protocol == arg1
+  TEST_PORT      arg1=port               result=temp    temp = packet.port == arg1
+  TEST_SRC       arg1=source             result=temp    temp = MATCH_SOURCE(packet.source, arg1)
+  AND            arg1=temp arg2=temp     result=temp
+  ASSIGN         arg1=TRUE               result=temp
+  IF_FALSE_GOTO  arg1=temp               result=label
+  GOTO                                   result=label
+  RETURN_ACTION  arg1=action arg2=rule
+
+The peephole optimizer (optimize_ir) then applies classic IR optimizations:
+  1. constant folding        tests against ANY become  t = TRUE
+  2. copy/constant propagation  t2 = t0 AND t1 with t0 = TRUE  becomes  t2 := t1
+  3. branch elimination      IF NOT TRUE GOTO L is never taken and is deleted
+  4. dead code elimination   assignments whose result is never used are deleted
+  5. unreachable code elimination  instructions no control path reaches are deleted
 """
 
-from typing import List, Optional
-from src.parser import PolicyNode, RuleNode
+from collections import Counter
+from typing import Dict, List, Optional, Set
+
+from src.parser import PolicyNode
+from src.policy_semantics import effective_port
+
+TEST_OPS = ("TEST_PROTO", "TEST_PORT", "TEST_SRC")
+PURE_OPS = TEST_OPS + ("AND", "ASSIGN")
 
 
 class Quadruple:
-    """Represents a standard compiler quadruple: (operator, arg1, arg2, result)."""
+    """A single quadruple (op, arg1, arg2, result)."""
 
     def __init__(self, op: str, arg1: Optional[str] = None, arg2: Optional[str] = None, result: Optional[str] = None):
         self.op = op
-        self.arg1 = str(arg1) if arg1 is not None else ""
-        self.arg2 = str(arg2) if arg2 is not None else ""
-        self.result = str(result) if result is not None else ""
-
-    def __repr__(self) -> str:
-        return f"({self.op:<12}, {self.arg1:<16}, {self.arg2:<16}, {self.result:<16})"
+        self.arg1 = arg1
+        self.arg2 = arg2
+        self.result = result
 
     def to_tac_string(self) -> str:
-        """Converts the quadruple into human-readable Three-Address Code (TAC) syntax."""
-        if self.op == "LABEL":
+        op = self.op
+        if op == "LABEL":
             return f"{self.result}:"
-        elif self.op == "TEST_PROTO":
-            return f"    {self.result} = (packet.protocol == {self.arg1})"
-        elif self.op == "TEST_PORT":
+        if op == "COMMENT":
+            return f"    # {self.arg1}"
+        if op == "TEST_PROTO":
+            return f"    {self.result} = (packet.protocol == '{self.arg1}')"
+        if op == "TEST_PORT":
             return f"    {self.result} = (packet.port == {self.arg1})"
-        elif self.op == "TEST_SRC":
-            return f"    {self.result} = MATCH_SOURCE(packet.source, {self.arg1})"
-        elif self.op == "AND":
+        if op == "TEST_SRC":
+            return f"    {self.result} = MATCH_SOURCE(packet.source, '{self.arg1}')"
+        if op == "AND":
             return f"    {self.result} = {self.arg1} AND {self.arg2}"
-        elif self.op == "IF_FALSE_GOTO":
+        if op == "ASSIGN":
+            return f"    {self.result} = {self.arg1}"
+        if op == "IF_FALSE_GOTO":
             return f"    IF NOT {self.arg1} GOTO {self.result}"
-        elif self.op == "RETURN_ACTION":
-            return f"    RETURN ACTION({self.arg1}) [Rule: {self.arg2}]"
-        elif self.op == "GOTO":
+        if op == "GOTO":
             return f"    GOTO {self.result}"
-        elif self.op == "COMMENT":
-            return f"\n    # {self.arg1}"
-        return f"    {self.op} {self.arg1} {self.arg2} -> {self.result}"
+        if op == "RETURN_ACTION":
+            return f"    RETURN ACTION({self.arg1}) [Rule: {self.arg2}]"
+        return f"    {op} {self.arg1} {self.arg2} {self.result}"
 
-
-class IRRule:
-    """Intermediate representation of an individual security rule."""
-
-    def __init__(self, rule_node: RuleNode, rule_index: int):
-        self.rule_name = rule_node.name
-        self.rule_index = rule_index
-        self.protocol = rule_node.protocol
-        self.port = rule_node.port
-        self.source = rule_node.source
-        self.action = rule_node.action
-        self.line = rule_node.line
-
-        self.label_start = f"LABEL_{self.rule_name}"
-        self.label_next = f"LABEL_RULE_{rule_index + 1}"
-        self.quadruples: List[Quadruple] = []
+    def __repr__(self) -> str:
+        return f"Quad({self.op}, {self.arg1}, {self.arg2}, {self.result})"
 
 
 class IntermediateProgram:
-    """Represents the complete compiled Intermediate Code for a policy."""
+    """A linear IR program."""
 
-    def __init__(self, ast: PolicyNode):
+    def __init__(self, ast: Optional[PolicyNode] = None, quadruples: Optional[List[Quadruple]] = None):
         self.ast = ast
-        self.rules_ir: List[IRRule] = []
-        self.quadruples: List[Quadruple] = []
-        self._temp_counter = 0
+        self.quadruples: List[Quadruple] = list(quadruples or [])
+        self.temp_counter = 0
 
-    def _new_temp(self) -> str:
-        temp = f"t{self._temp_counter}"
-        self._temp_counter += 1
-        return temp
+    def new_temp(self) -> str:
+        t = f"t{self.temp_counter}"
+        self.temp_counter += 1
+        return t
+
+    def emit(self, op: str, arg1=None, arg2=None, result=None) -> None:
+        self.quadruples.append(Quadruple(op, arg1, arg2, result))
 
     def generate(self) -> "IntermediateProgram":
-        """Translates the AST into Three-Address Code quadruples."""
-        self.rules_ir.clear()
-        self.quadruples.clear()
-        self._temp_counter = 0
+        rules = self.ast.rules
+        labels = [f"R{i}_{rule.name}" for i, rule in enumerate(rules, 1)] + ["DEFAULT_FALLBACK"]
 
-        self.quadruples.append(Quadruple("COMMENT", "Begin Security Policy Evaluation"))
-        self.quadruples.append(Quadruple("LABEL", result="POLICY_ENTRY"))
+        self.emit("COMMENT", "First-match policy evaluation, default BLOCK")
+        for idx, rule in enumerate(rules):
+            self.emit("LABEL", result=labels[idx])
+            t_proto = self.new_temp()
+            self.emit("TEST_PROTO", rule.protocol, None, t_proto)
+            t_port = self.new_temp()
+            self.emit("TEST_PORT", str(effective_port(rule)), None, t_port)
+            t_pp = self.new_temp()
+            self.emit("AND", t_proto, t_port, t_pp)
+            t_src = self.new_temp()
+            self.emit("TEST_SRC", rule.source, None, t_src)
+            t_all = self.new_temp()
+            self.emit("AND", t_pp, t_src, t_all)
+            self.emit("IF_FALSE_GOTO", t_all, None, labels[idx + 1])
+            self.emit("RETURN_ACTION", rule.action, rule.name)
 
-        total_rules = len(self.ast.rules)
-
-        for idx, rule in enumerate(self.ast.rules):
-            ir_rule = IRRule(rule, idx)
-            next_label = f"LABEL_RULE_{idx + 1}" if idx + 1 < total_rules else "LABEL_DEFAULT_FALLBACK"
-
-            # Rule Label
-            ir_rule.quadruples.append(Quadruple("LABEL", result=ir_rule.label_start))
-
-            # 1. Test Protocol
-            t_proto = self._new_temp()
-            proto_val = "ANY" if ir_rule.protocol == "ANY" else f"'{ir_rule.protocol}'"
-            ir_rule.quadruples.append(Quadruple("TEST_PROTO", proto_val, None, t_proto))
-
-            # 2. Test Port
-            t_port = self._new_temp()
-            port_val = "ANY" if ir_rule.port == "ANY" else str(ir_rule.port)
-            ir_rule.quadruples.append(Quadruple("TEST_PORT", port_val, None, t_port))
-
-            # Combine proto and port
-            t_cond1 = self._new_temp()
-            ir_rule.quadruples.append(Quadruple("AND", t_proto, t_port, t_cond1))
-
-            # 3. Test Source
-            t_src = self._new_temp()
-            src_val = f"'{ir_rule.source}'"
-            ir_rule.quadruples.append(Quadruple("TEST_SRC", src_val, None, t_src))
-
-            # Final match condition
-            t_match = self._new_temp()
-            ir_rule.quadruples.append(Quadruple("AND", t_cond1, t_src, t_match))
-
-            # Branching: if false jump to next rule
-            ir_rule.quadruples.append(Quadruple("IF_FALSE_GOTO", t_match, None, next_label))
-
-            # Action execution: return action
-            ir_rule.quadruples.append(Quadruple("RETURN_ACTION", ir_rule.action, ir_rule.rule_name, None))
-
-            self.rules_ir.append(ir_rule)
-            self.quadruples.extend(ir_rule.quadruples)
-
-        # Default Deny/Block Fallback
-        self.quadruples.append(Quadruple("COMMENT", "Default Fallback Action (First-Match Semantics)"))
-        self.quadruples.append(Quadruple("LABEL", result="LABEL_DEFAULT_FALLBACK"))
-        self.quadruples.append(Quadruple("RETURN_ACTION", "BLOCK", "DEFAULT_POLICY", None))
-
+        self.emit("LABEL", result=labels[-1])
+        self.emit("RETURN_ACTION", "BLOCK", "DEFAULT_FALLBACK")
         return self
 
     def format_tac(self) -> str:
-        """Returns readable Three-Address-Code string representation."""
-        lines = ["# --- Three-Address Code (TAC) Representation ---"]
-        for quad in self.quadruples:
-            lines.append(quad.to_tac_string())
+        lines = ["# --- Three-Address Code (TAC) ---"]
+        lines.extend(q.to_tac_string() for q in self.quadruples)
         return "\n".join(lines)
 
     def format_quadruples(self) -> str:
-        """Formats the quadruples into a standard compiler table."""
-        header = f"{'Index':<6} | {'Operator':<16} | {'Arg 1':<20} | {'Arg 2':<12} | {'Result':<24}"
-        separator = "-" * len(header)
         lines = [
-            "# --- Intermediate Code Quadruples Table ---",
-            separator,
-            header,
-            separator,
+            "+-------+-----------------+----------------------+----------------------+--------------------------+",
+            "| INDEX | OPERATOR        | ARG 1                | ARG 2                | RESULT                   |",
+            "+-------+-----------------+----------------------+----------------------+--------------------------+",
         ]
-        idx = 0
-        for quad in self.quadruples:
-            if quad.op == "COMMENT":
-                continue
-            lines.append(f"{idx:<6} | {quad.op:<16} | {quad.arg1:<20} | {quad.arg2:<12} | {quad.result:<24}")
-            idx += 1
-        lines.append(separator)
+        for i, q in enumerate(self.quadruples):
+            a1 = (str(q.arg1) if q.arg1 is not None else "-")[:20]
+            a2 = (str(q.arg2) if q.arg2 is not None else "-")[:20]
+            res = (str(q.result) if q.result is not None else "-")[:24]
+            lines.append(f"| {i:<5} | {q.op:<15} | {a1:<20} | {a2:<20} | {res:<24} |")
+        lines.append(lines[0])
         return "\n".join(lines)
 
 
+class IROptimizationReport:
+    def __init__(self, before: int, after: int, stats: Counter):
+        self.before = before
+        self.after = after
+        self.stats = stats
+
+    def format_report(self) -> str:
+        names = {
+            "constant_folded": "Constant folding (tests against ANY -> TRUE)",
+            "propagated": "Copy/constant propagation (AND with TRUE)",
+            "branch_eliminated": "Branch elimination (IF NOT TRUE)",
+            "dead_removed": "Dead code elimination (unused temporaries)",
+            "unreachable_removed": "Unreachable code elimination",
+        }
+        lines = [f"IR quadruples: {self.before} -> {self.after} after peephole optimization"]
+        for key, label in names.items():
+            if self.stats.get(key):
+                lines.append(f"  - {label}: {self.stats[key]}")
+        if self.before == self.after:
+            lines.append("  (no IR-level simplifications applied)")
+        return "\n".join(lines)
+
+
+def _clone(q: Quadruple) -> Quadruple:
+    return Quadruple(q.op, q.arg1, q.arg2, q.result)
+
+
+def optimize_ir(program: IntermediateProgram):
+    """Peephole-optimizes an IR program. Returns (new_program, IROptimizationReport)."""
+    stats: Counter = Counter()
+    before = len(program.quadruples)
+    known_true: Set[str] = set()
+    alias: Dict[str, str] = {}
+
+    def resolve(t: str) -> str:
+        while t in alias:
+            t = alias[t]
+        return t
+
+    # 1-3: folding, propagation, branch elimination (single forward pass)
+    out: List[Quadruple] = []
+    for q in program.quadruples:
+        if q.op in TEST_OPS and str(q.arg1).upper() == "ANY":
+            out.append(Quadruple("ASSIGN", "TRUE", None, q.result))
+            known_true.add(q.result)
+            stats["constant_folded"] += 1
+        elif q.op == "AND":
+            a, b = resolve(q.arg1), resolve(q.arg2)
+            if a in known_true and b in known_true:
+                out.append(Quadruple("ASSIGN", "TRUE", None, q.result))
+                known_true.add(q.result)
+                stats["propagated"] += 1
+            elif a in known_true:
+                alias[q.result] = b
+                stats["propagated"] += 1
+            elif b in known_true:
+                alias[q.result] = a
+                stats["propagated"] += 1
+            else:
+                out.append(Quadruple("AND", a, b, q.result))
+        elif q.op == "IF_FALSE_GOTO":
+            t = resolve(q.arg1)
+            if t in known_true:
+                stats["branch_eliminated"] += 1
+            else:
+                out.append(Quadruple("IF_FALSE_GOTO", t, None, q.result))
+        else:
+            out.append(_clone(q))
+
+    # 4: dead code elimination, repeated until stable
+    while True:
+        used = set()
+        for q in out:
+            if q.op == "AND":
+                used.update((q.arg1, q.arg2))
+            elif q.op == "IF_FALSE_GOTO":
+                used.add(q.arg1)
+        kept = [q for q in out if not (q.op in PURE_OPS and q.result not in used)]
+        if len(kept) == len(out):
+            break
+        stats["dead_removed"] += len(out) - len(kept)
+        out = kept
+
+    # 5: unreachable code elimination (reachability over the control-flow graph)
+    label_at = {q.result: i for i, q in enumerate(out) if q.op == "LABEL"}
+    reachable: Set[int] = set()
+    work = [0] if out else []
+    while work:
+        i = work.pop()
+        if i in reachable or i >= len(out):
+            continue
+        reachable.add(i)
+        q = out[i]
+        if q.op == "RETURN_ACTION":
+            continue
+        if q.op == "GOTO":
+            work.append(label_at[q.result])
+            continue
+        if q.op == "IF_FALSE_GOTO":
+            work.append(label_at[q.result])
+        work.append(i + 1)
+    stats["unreachable_removed"] = sum(1 for i, q in enumerate(out) if i not in reachable and q.op != "COMMENT")
+    out = [q for i, q in enumerate(out) if i in reachable]
+
+    # Renumber temporaries densely (t0, t1, ...) for readability.
+    rename: Dict[str, str] = {}
+    for q in out:
+        if q.op in PURE_OPS and q.result not in rename:
+            rename[q.result] = f"t{len(rename)}"
+    for q in out:
+        if q.op in PURE_OPS:
+            q.result = rename[q.result]
+        if q.op == "AND":
+            q.arg1, q.arg2 = rename[q.arg1], rename[q.arg2]
+        elif q.op == "IF_FALSE_GOTO":
+            q.arg1 = rename[q.arg1]
+
+    optimized = IntermediateProgram(program.ast, out)
+    optimized.temp_counter = len(rename)
+    return optimized, IROptimizationReport(before, len(out), stats)
+
+
 def generate_ir(ast: PolicyNode) -> IntermediateProgram:
-    """Helper function to compile AST to Intermediate Program."""
-    ir_prog = IntermediateProgram(ast)
-    return ir_prog.generate()
+    """Helper function to generate the (unoptimized) IR for a policy AST."""
+    return IntermediateProgram(ast).generate()

@@ -1,0 +1,12 @@
+[
+  {"protocol": "TCP",  "port": 22,  "source": "192.168.50.9"},
+  {"protocol": "TCP",  "port": 22,  "source": "192.168.1.10"},
+  {"protocol": "TCP",  "port": 22,  "source": "10.20.3.4"},
+  {"protocol": "TCP",  "port": 8080, "source": "10.20.3.4"},
+  {"protocol": "TCP",  "port": 443, "source": "203.0.113.50"},
+  {"protocol": "TCP",  "port": 443, "source": "198.51.100.7"},
+  {"protocol": "UDP",  "port": 53,  "source": "203.0.113.5"},
+  {"protocol": "ICMP", "port": 0,   "source": "172.16.4.4"},
+  {"protocol": "TCP",  "port": 22,  "source": "INTERNAL"},
+  {"protocol": "TCP",  "port": 22,  "source": "UNKNOWN"}
+]
