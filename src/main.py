@@ -35,7 +35,7 @@ from src.intermediate_code import generate_ir, optimize_ir
 from src.code_generator import DEMO_PACKETS, format_simulation_table, generate_python_code
 from src.ir_vm import execute_ir
 from src.verifier import verify
-
+from src.sast_analyzer import analyze_python_source, format_sast_report
 
 class CompilationResult:
     """Everything the pipeline produced; useful for tests and tooling."""
@@ -51,6 +51,7 @@ class CompilationResult:
         self.ir = None
         self.ir_report = None
         self.code: Optional[str] = None
+        self.sast_findings = []
         self.verification = None
 
 
@@ -79,6 +80,7 @@ def compile_source(source_code: str, source_name: str = "<input>", optimize: boo
     else:
         res.ir = res.ir_raw
     res.code = generate_python_code(res.ir, source_name=source_name, rule_count=len(final_policy.rules))
+    res.sast_findings = analyze_python_source(res.code)
     if run_verification:
         res.verification = verify(res.normalized, res.ir.quadruples, res.code)
     return res
@@ -115,7 +117,8 @@ def compile_policy(source_code: str, file_path: str = "<input>", show_all: bool 
                    show_tokens: bool = False, show_ast: bool = False, show_ir: bool = False,
                    show_analysis: bool = False, do_optimize: bool = False, output_file: Optional[str] = None,
                    simulate: bool = False, packets: Optional[List[Dict[str, Any]]] = None,
-                   optimize: bool = True, aggressive: bool = False, strict: bool = False) -> bool:
+                   optimize: bool = True, aggressive: bool = False, strict: bool = False,
+                   show_sast: bool = False) -> bool:
     """Compiles a policy, prints the requested phases and returns True on success."""
     print_banner(f"COMPILING: {file_path}")
 
@@ -178,6 +181,10 @@ def compile_policy(source_code: str, file_path: str = "<input>", show_all: bool 
     print("\n[*] Translation Validation")
     print("    " + res.verification.format_report().replace("\n", "\n    "))
 
+    if show_all or show_sast:
+        print("\n[*] SAST Analysis (generated Python)")
+        print("    " + format_sast_report(res.sast_findings).replace("\n", "\n    "))
+
     if show_all or simulate or packets:
         sim_packets = packets or DEMO_PACKETS
         title = "your packets" if packets else "demo packets"
@@ -211,6 +218,7 @@ def main() -> None:
     ap.add_argument("--analysis", action="store_true", help="Show the anomaly report")
     ap.add_argument("--optimize", action="store_true", help="Show the optimization report")
     ap.add_argument("--simulate", action="store_true", help="Run the demo packet simulation")
+    ap.add_argument("--sast", action="store_true", help="Show the SAST report for the generated Python code")
     ap.add_argument("--all", action="store_true", help="Show every phase in detail (default when no view flag is given)")
     ap.add_argument("-o", "--output", help="Write the generated Python policy to this file")
     ap.add_argument("--packet", action="append", default=[], metavar="\"PROTO PORT SRC\"",
@@ -236,12 +244,13 @@ def main() -> None:
         print(f"Error: {e}")
         sys.exit(1)
 
-    view_flags = any([args.tokens, args.ast, args.ir, args.analysis, args.optimize, args.simulate, packets])
+    view_flags = any([args.tokens, args.ast, args.ir, args.analysis, args.optimize, args.simulate, args.sast, packets])
     ok = compile_policy(
         source, file_path=args.file, show_all=args.all or not view_flags,
         show_tokens=args.tokens, show_ast=args.ast, show_ir=args.ir, show_analysis=args.analysis,
         do_optimize=args.optimize, output_file=args.output, simulate=args.simulate, packets=packets or None,
         optimize=not args.no_optimize, aggressive=args.aggressive, strict=args.strict,
+        show_sast=args.sast,
     )
     sys.exit(0 if ok else 1)
 
