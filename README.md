@@ -23,7 +23,7 @@ Real firewalls accumulate thousands of rules. Administrators add duplicates, con
 - **IR-driven back end**: Python code is generated instruction-by-instruction from the optimized quadruples; an **IR virtual machine** can also execute the IR directly.
 - **Translation validation**: after every compilation, the original policy, the optimized IR and the generated Python are compared on one packet from *every* equivalence class, which is exhaustive for this language.
 - **Usable on your own policies and packets**: evaluate packets from the command line or a JSON file; the generated program is a standalone tool.
-- **No dependencies**: Python 3.8+ standard library only. 50 unit, regression and fuzz tests.
+- **No dependencies**: Python 3.8+ standard library only. 62 unit, regression and fuzz tests.
 
 ---
 
@@ -148,6 +148,7 @@ python output/my_policy.py                                # demo packets
 | Option | Effect |
 |---|---|
 | `--tokens`, `--ast`, `--ir`, `--analysis`, `--optimize` | Show that phase in detail |
+| `--sast` | Display Static Application Security Testing findings for generated Python code |
 | `--simulate` | Run the demo packets |
 | `--all` | Show every phase (default when no view option is given) |
 | `--packet "PROTO PORT SRC"` | Evaluate a packet (repeatable) |
@@ -226,3 +227,4 @@ R1_ALLOW_HTTP_ANY:
 ## 11. Reference
 
 E. Al-Shaer and H. Hamed, "Firewall Policy Advisor for Anomaly Discovery and Rule Editing," *IFIP/IEEE IM*, 2003; "Discovery of Policy Anomalies in Distributed Firewalls," *IEEE INFOCOM*, 2004.
+
