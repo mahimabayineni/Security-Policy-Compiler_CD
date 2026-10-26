@@ -188,9 +188,36 @@ def compile_policy(source_code: str, file_path: str = "<input>", show_all: bool 
     if show_all or simulate or packets:
         sim_packets = packets or DEMO_PACKETS
         title = "your packets" if packets else "demo packets"
-        print(f"\n[*] Packet Simulation ({title}, executed on the optimized IR)")
-        results = [{"packet": p, **execute_ir(res.ir.quadruples, p)} for p in sim_packets]
+        print(f"\n[*] Packet Simulation ({title}, IR step counts)")
+
+        # Run each packet through the optimized IR (for the display table)
+        # and through the raw IR (solely to measure interpreter step counts).
+        results = []
+        raw_steps_list: List[int] = []
+        for p in sim_packets:
+            opt_result = execute_ir(res.ir.quadruples, p)
+            results.append({"packet": p, **opt_result})
+            # Only measure raw steps when optimization was applied
+            if res.ir is not res.ir_raw:
+                raw_result = execute_ir(res.ir_raw.quadruples, p)
+                raw_steps_list.append(raw_result["steps"])
+
         print(format_simulation_table(results))
+
+        # Print average step-count comparison only when optimization was
+        # actually performed and there are packets to measure.
+        if res.ir is not res.ir_raw and sim_packets:
+            opt_steps_list = [r["steps"] for r in results]
+            avg_raw = sum(raw_steps_list) / len(raw_steps_list)
+            avg_opt = sum(opt_steps_list) / len(opt_steps_list)
+            if avg_raw > 0:
+                pct = (avg_raw - avg_opt) / avg_raw * 100
+                print(f"\n    IR step-count comparison (interpreter steps per packet):")
+                print(f"      Raw IR avg  : {avg_raw:.1f} steps")
+                print(f"      Opt IR avg  : {avg_opt:.1f} steps")
+                print(f"      Reduction   : {pct:.1f}%")
+                print(f"      Note: fewer interpreter steps reflect the removal of")
+                print(f"            redundant IR instructions, not wall-clock speed.")
 
     ok = res.verification.passed
     if strict and res.analysis.has_errors():

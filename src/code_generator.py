@@ -233,11 +233,22 @@ import sys
 
 
 def format_simulation_table(results: List[Dict[str, Any]]) -> str:
-    border = "+" + "-" * 38 + "+" + "-" * 26 + "+" + "-" * 10 + "+"
-    lines = [border, f"| {'PACKET (Proto:Port src=Source)':<36} | {'MATCHED RULE':<24} | {'ACTION':<8} |", border]
+    show_steps = any("steps" in r for r in results)
+    steps_w = 7  # width of the STEPS column value cell
+    if show_steps:
+        border = "+" + "-" * 38 + "+" + "-" * 26 + "+" + "-" * 10 + "+" + "-" * (steps_w + 2) + "+"
+        header = (f"| {'PACKET (Proto:Port src=Source)':<36} | {'MATCHED RULE':<24} |"
+                  f" {'ACTION':<8} | {'STEPS':>{steps_w}} |")
+    else:
+        border = "+" + "-" * 38 + "+" + "-" * 26 + "+" + "-" * 10 + "+"
+        header = f"| {'PACKET (Proto:Port src=Source)':<36} | {'MATCHED RULE':<24} | {'ACTION':<8} |"
+    lines = [border, header, border]
     for res in results:
         p = res["packet"]
         desc = f"{str(p.get('protocol', '')).upper()}:{p.get('port', 0)} src={p.get('source', '')}"
-        lines.append(f"| {desc[:36]:<36} | {str(res['matched_rule'])[:24]:<24} | {res['action']:<8} |")
+        row = f"| {desc[:36]:<36} | {str(res['matched_rule'])[:24]:<24} | {res['action']:<8} |"
+        if show_steps:
+            row += f" {res['steps']:>{steps_w}} |"
+        lines.append(row)
     lines.append(border)
     return "\n".join(lines)
